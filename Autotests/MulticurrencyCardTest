@@ -1,0 +1,346 @@
+package ru.sbt.qa.mapi.tests.mapi.multicurrency.transfer;
+
+import org.junit.Assert;
+import org.junit.Test;
+import ru.sbt.qa.constants.System;
+import ru.sbt.qa.constants.*;
+import ru.sbt.qa.data.ExternalParameter;
+import ru.sbt.qa.data.bean.DataTestCase;
+import ru.sbt.qa.mapi.core.bean.response.MAPIResponse;
+import ru.sbt.qa.mapi.core.util.Amount;
+import ru.sbt.qa.mapi.core.util.Currency;
+import ru.sbt.qa.mapi.pages.UserLoginPage;
+import ru.sbt.qa.mapi.pages.UserMainPage;
+import ru.sbt.qa.mapi.pages.UserOperationHistoryPage;
+import ru.sbt.qa.mapi.pages.admin.AuditPage;
+import ru.sbt.qa.mapi.pages.admin.MessageLogPage;
+import ru.sbt.qa.mapi.pages.admin.UserActivityLogPage;
+import ru.sbt.qa.mapi.permission.PermissionBuilder;
+import ru.sbt.qa.mapi.requests.mapi.ConfirmPaymentUniversalRq;
+import ru.sbt.qa.mapi.requests.mapi.ProductsListRq;
+import ru.sbt.qa.mapi.requests.mapi.multicurrency.InitMultiCurrencyCardTransferInsideCardClaimRq;
+import ru.sbt.qa.mapi.requests.mapi.multicurrency.MultiCurrencyUniversalRq;
+import ru.sbt.qa.mapi.requests.mapi.multicurrency.SaveMultiCurrencyCardTransferInsideCardClaimRq;
+import ru.sbt.qa.mapi.requests.mapi.payments.*;
+import ru.sbt.qa.mapi.requests.mapi.printcheck.PrintCheckRq;
+import ru.sbt.qa.mapi.responses.external.BankAcctInqRs;
+import ru.sbt.qa.mapi.responses.mapi.response.ProductsListRs;
+import ru.sbt.qa.mapi.responses.mapi.response.payments.*;
+import ru.sbt.qa.mapi.tests.mapi.multicurrency.MultiCurrencyConstants;
+import ru.sbt.qa.mapi.tests.mapi.multicurrency.add.MultiCurrencyAddSteps;
+import ru.sbt.qa.util.DateHelper;
+import ru.sbt.qa.util.StringHelper;
+import ru.sbt.qa.util.database.Database;
+import ru.yandex.qatools.allure.annotations.Features;
+import ru.yandex.qatools.allure.annotations.Stories;
+import ru.yandex.qatools.allure.annotations.TestCaseId;
+import ru.yandex.qatools.allure.annotations.Title;
+import static ru.sbt.qa.data.bean.DataTestCase.getFirstUserLoginID;
+
+@Features("Проверка перевода между счетами мультивалютной карты")
+@Title("Проверка перевода между счетами мультивалютной карты")
+public class MultiCurrencyTransferTest extends MultiCurrencyTransferSteps {
+    @Test
+    @TestCaseId("77692")
+    @Stories("77692 Проверка текста в Истории операции для статуса UNKNOW в mAPI")
+    public void checkMultiCurrencyChangeWebUnknown() {
+        setAccessRightsForUser(0,
+        PermissionBuilder.enableAllChannels(PermissionArm.MULTI_CURRENCY_MAIN),
+        PermissionBuilder.enableAllChannels(PermissionArm.MULTI_CURRENCY_TRANSFER));
+   
+        registerAndLogin();
+   
+        String multiCurrencyCard = getActiveUser()
+            .getParameter(ExternalParameter.VISA_CLASSIC_CARD);
+   
+        String cardId = new ProductsListRq()
+            .setShowProductType(ProductType.CARDS)
+            .getAsProductsListRs().validateCodeZero()
+            .getCardIdWithPrefixByNumber(multiCurrencyCard);
+   
+        String transactionToken = new MultiCurrencyUniversalRq()
+            .setOperation(Operation.INIT)
+            .setForm(Form.MULTI_CURRENCY_TRANSFER)
+            .setCard(cardId)
+            .getMultiCurrencyUniversalRs().validateCodeZero()
+            .validateInitForm(Form.MULTI_CURRENCY_TRANSFER)
+            .getTransactionToken();
+   
+        MAPIResponse multiCurrencySaveRs = new MultiCurrencyUniversalRq()
+            .setOperation(Operation.SAVE)
+            .setForm(Form.MULTI_CURRENCY_TRANSFER)
+            .setCard(cardId)
+            .setFromResource(Currency.RUB.name())
+            .setToResource(Currency.EUR.name())
+            .setBuyAmount(MultiCurrencyConstants.BUY_AMOUNT_SUM)
+            .setInitTransactionToken(transactionToken)
+            .getMultiCurrencyUniversalRs()
+            .validateCodeZero()
+            .validateDocumentStatus(PaymentStatus.SAVED)
+            .validateDocumentForm(Form.MULTI_CURRENCY_TRANSFER);
+   
+        MAPIResponse multiCurrencyConfirmRs = new ConfirmPaymentUniversalRq()
+            .getConfirmPaymentUniversalRs(multiCurrencySaveRs)
+            .validateNoEditableTagsSuccess()
+            .validateDocumentStatus(PaymentStatus.UNKNOW)
+            .validateDocumentForm(Form.MULTI_CURRENCY_TRANSFER);
+   
+        new UserLoginPage().loginUser();
+   
+        UserMainPage userMainPage = new UserMainPage();
+   
+        userMainPage.pageIsLoad();
+   
+        userMainPage.getOperationHistory().click();
+   
+        new UserOperationHistoryPage().checkOperationNameAndDocumentStatus(multiCurrencyConfirmRs,
+        MultiCurrencyConstants.OPERATION_TRANSFER_NAME, OperationStatus.IN_PROGRESS);
+   
+        checkTransferWebRequestFields(multiCurrencyConfirmRs, multiCurrencyCard, OperationStatus.OPERATION_IN_PROGRESS,
+        multiCurrencyConfirmRs.getDocId(), MultiCurrencyConstants.RUB, MultiCurrencyConstants.EUR);
+    }
+   
+    @Step("Проверяем корректность отображения полей в заявке в истории операции веб")
+    public void checkTransferWebRequestFields(MAPIResponse multiCurrencyConfirmRs,
+    String multiCurrencyCard, String status, String documentId, String credit, String writeOff) {
+        UserHistoryOperationDetailsPage userHistoryOperationDetailsPage = new UserHistoryOperationDetailsPage();
+   
+        userHistoryOperationDetailsPage.pageIsLoad();
+   
+        String docNumber = Database.getBusinessDocument(documentId).get("DOC_NUMBER");
+   
+        Assert.assertEquals("В деталях Истории операции неверно отображается номер документа", docNumber,
+        userHistoryOperationDetailsPage.getCardResource().getText().trim());
+   
+        Assert.assertTrue("В деталях Истории операции неверно отображается номер карты",
+        userHistoryOperationDetailsPage.getCardNum().getText().contains(multiCurrencyCard));
+   
+        Assert.assertEquals("В деталях Истории операции неверно отображается статус заявки", status,
+        userHistoryOperationDetailsPage.getRequestStatus().getText());
+       
+        Assert.assertEquals("В деталях Истории операции неверно отображается счёт списания", credit,
+        userHistoryOperationDetailsPage.getCreditAccount().getText().trim());
+       
+        Assert.assertEquals("В деталях Истории операции неверно отображается счёт зачисления", writeOff,
+        userHistoryOperationDetailsPage.getWriteOffAccount().getText().trim());
+       
+        String rateOfExchange = multiCurrencyConfirmRs.getValueByName("rateOfExchange");
+       
+        Assert.assertEquals("В деталях Истории операции неверно отображается курс конверсии", rateOfExchange,
+        userHistoryOperationDetailsPage.getRateOfExchange().getText().trim());
+       
+        String addSum = multiCurrencyConfirmRs.getValueByName("buyAmount");
+       
+        Assert.assertEquals("В деталях Истории операции неверно отображается сумма зачисления", addSum,
+        userHistoryOperationDetailsPage.getCreditedAmount().getText().trim());
+       
+        String takeSum = multiCurrencyConfirmRs.getValueByName("sellAmount");
+       
+        Assert.assertEquals("В деталях Истории операции неверно отображается сумма списания", takeSum,
+        userHistoryOperationDetailsPage.getWriteOffAmount().getText().trim());
+    }
+   
+    @Test
+    @TestCaseId("88625")
+    @Stories("88625 Перевод карта на счет другого клиента")
+    public void checkCardAccountTransfer() {
+        String fromTime = DateHelper.getCurrentDate(DateHelper.HH_MM_SS);
+       
+        Database.checkPropertyValue(PropertyKey.CARD_FILL_ACCTID_AT_CARD_PAYMENT_LIGHT_SERVICES, Boolean.TRUE);
+       
+        registerAndLogin();
+       
+        String fromResource = new ProductsListRq()
+            .getAsProductsListRs()
+            .validateCodeZero()
+            .getCardIdWithPrefixByNumber(data.getParameter(ExternalParameter.RUB_CARD));
+       
+        DataTestCase.setNextBlockActive();
+       
+        InitRurPaymentRs initRs = new InitRurPaymentRq()
+            .setIsFromAddrBook(false)
+            .setIsPublicKeyRequired(true)
+            .getInitRurPaymentRs()
+            .validateCodeZero();
+           
+        SaveRurPaymentRs saveRs = new SaveRurPaymentRq()
+            .setReceiverSubType(ReceiverSubType.OUR_ACCOUNT)
+            .setFromResource(fromResource)
+            .setReceiverAccountInternal(data.getBlockData("Номер счета получателя"))
+            .setReceiverFirstName(data.getBlockData("Имя"))
+            .setReceiverSurname(data.getBlockData("Фамилия"))
+            .setReceiverPatrName(data.getBlockData("Отчество"))
+            .setBank(data.getBlockData("Наименование банка"))
+            .setReceiverCorAccount(data.getBlockData("Кор. Счет"))
+            .setReceiverBIC(data.getBlockData("БИК"))
+            .setBuyAmount("100")
+            .setIsCardTransfer(false)
+            .setIsErrorCurrency(false)
+            .setBuyAmountCurrency(Currency.RUB.name())
+            .setExactAmount(Amount.DESTINATION_FIELD_EXACT)
+            .setLongOfferAllowed(true)
+            .setGround("назначение")
+            .getSaveRurPaymentRs(initRs).validateCodeZero();
+       
+        new ConfirmPaymentUniversalRq().getConfirmRurPaymentRs(saveRs).validateNoEditableTagsSuccess();
+       
+        adminLogin();
+       
+        Assert.assertNotNull("Нет запроса XferAddRq", findMessageInJournalMobileApi9(fromTime, Request.X_FER_ADD_RQ));
+       
+        Assert.assertNotNull("Нет поля CardAcctIdFrom", new MessageLogPage().findValueInRequest("CardAcctIdFrom"));
+    }
+   
+    @Test
+    @TestCaseId("99225")
+    @Stories("99225 Проверка отключения права фрод-мониторинга")
+    public void checkFrodMonRightsOff() {
+        setAccessRightsForUser(0,
+        PermissionBuilder.enableAllChannels(PermissionArm.MULTI_CURRENCY_MAIN),
+        PermissionBuilder.enableAllChannels(PermissionArm.MULTI_CURRENCY_TRANSFER),
+        PermissionBuilder.disableAllChannels(PermissionArm.MULTI_CURRENCY_FROD_MON));
+       
+        registerAndLogin();
+       
+        String cardId = new ProductsListRq()
+            .setShowProductType(ProductType.CARDS)
+            .getAsProductsListRs()
+            .validateCodeZero()
+            .getCardIdWithPrefixByNumber(getActiveUser().getParameter(ExternalParameter.EUR_CARD));
+       
+        String fromTime = DateHelper.getCurrentDate(DateHelper.HH_MM_SS);
+       
+        InitMultiCurrencyCardTransferInsideCardClaimRs multiCurrencyInitRs = new
+            InitMultiCurrencyCardTransferInsideCardClaimRq()
+            .setCard(cardId)
+            .getInitMultiCurrencyCardTransferInsideCardClaimRs()
+            .validateCodeZero();
+       
+        SaveMultiCurrencyCardTransferInsideCardClaimRs multiCurrencySaveRs = new
+            SaveMultiCurrencyCardTransferInsideCardClaimRq()
+            .setCard(cardId)
+            .setFromResource(Currency.EUR.name())
+            .setToResource(Currency.USD.name())
+            .setBuyAmount(MultiCurrencyConstants.BUY_AMOUNT_SUM)
+            .getSaveMultiCurrencyCardTransferInsideCardClaimRs(multiCurrencyInitRs)
+            .validateCodeZero();
+       
+        new ConfirmPaymentUniversalRq()
+            .getConfirmMultiCurrencyTransferCurrencyRs(multiCurrencySaveRs)
+            .validateNoEditableTagsSuccess();
+       
+        Assert.assertFalse("Присутствует запрос request", findMessageInJournalMobileApi9(fromTime, Request.REQUEST));
+    }
+   
+    @Test
+    @TestCaseId("93636")
+    @Stories("93636 Проверка кода ошибки 208. Вывод текста в АРМ")
+    public void checkExternalTopUpCode208ARM() {
+        Database.checkPropertyValue(PropertyKey.EXTERNAL_TOP_UP_ALLOWED, true);
+       
+        setAccessRightsForUser(0, PermissionBuilder.enableAllChannels(PermissionArm.EXTERNAL_TOP_UP));
+       
+        registerAndLogin();
+       
+        String toCard = new ProductsListRq()
+            .getAsProductsListRs()
+            .getCardIdWithPrefixByNumber
+            (data.getParameter(ExternalParameter.ADDITIONAL_CARD));
+           
+        String transactionToken = new ExternalTopUpInitRq()
+            .getExternalTopUpInitRs()
+            .validateCodeZero()
+            .getTransactionToken();
+       
+        MAPIResponse externalTopUpSaveUniversalRs = new
+            ExternalTopUpSaveUniversalRq()
+            .setExternalPan(getActiveUser()
+            .getParameter(ExternalParameter.VISA_ELECTRON_CARD))
+            .setToResource(toCard)
+            .setBuyAmountCurrency(ExternalTopUpConstants.BUY_AMOUNT_CURRENCY)
+            .setBuyAmount(ExternalTopUpConstants.BUY_AMOUNT)
+            .setPaySystem(ExternalTopUpConstants.PAY_SYSTEM)
+            .setBin(ExternalTopUpConstants.BIN)
+            .setEncryptedCredentials(ExternalTopUpConstants
+            .ENCRYPTED_CREDENTIALS)
+            .getExternalTopUpSaveUniversalRs(transactionToken)
+            .validateCodeZero();
+       
+        MAPIResponse externalTopUpConfirmRs = new ConfirmPaymentUniversalRq()
+            .getConfirmPaymentUniversalRs(externalTopUpSaveUniversalRs).validateNoEditableTagsSuccess();
+       
+        new ExternalTopUpSaveUniversalRq()
+            .getExternalTopUpSaveUniversalRs(externalTopUpConfirmRs.getTransactionToken()
+            .validateCodeZero()
+            .validateDocumentStatus(PaymentStatus.REFUSED)
+            .validateWarningText(data.getMessage(MessagesText.P2P_REFUSED_WARNING_TEXT_208), 0)
+            .validateWarningText(data.getMessage(MessagesText.P2P_REFUSED_WARNING_DEFAULT_TITLE), 1)
+            .validateWarningMessageId(MessageId.P2P_WARNING_REFUSED_MESSAGE_ID_TEXT, 0)
+            .validateWarningMessageId(MessageId.P2P_WARNING_REFUSED_MESSAGE_ID_TITLE, 1);
+           
+        Assert.assertEquals("Пришло неверное значение поля rbs-code", "208",
+        Database.getOperationExtendedParameter(externalTopUpConfirmRs.getDocId(), "rbs-code"));
+       
+        adminLogin();
+       
+        checkExternalTopUpRBSResponseInAudit(externalTopUpConfirmRs.getDocId(),
+        StringUtils.substringBefore(data.getMessage(MessagesText.P2P_REFUSED_WARNING_TEXT_208), "&#xA;"));
+    }
+   
+    @Test
+    @TestCaseId("88600")
+    @Stories("88600 Перевод карта Way4-Мультивалютная карта")
+    public void checkWay4CardMultiCurrencyTransfer() {
+        String fromTime = DateHelper.getCurrentDate(DateHelper.HH_MM_SS);
+       
+        Database.checkPropertyValue(PropertyKey.CARD_FILL_ACCTID_AT_CARD_PAYMENT_LIGHT_SERVICES, Boolean.TRUE);
+       
+        registerAndLogin();
+       
+        ProductsListRs productsRs = new ProductsListRq()
+            .getAsProductsListRs()
+            .validateCodeZero();
+           
+        productsRs.getCards();
+       
+        MAPIResponse response = getResponseFromCodlog(Request.BANK_ACCT_INQ_RQ,false);
+       
+        Long fromCard = productsRs.getCardIdByNumber(getActiveUser().getParameter(ExternalParameter.VISA_ELECTRON_CARD));
+       
+        Assert.assertNotNull("Карта Way4 не найдена", response.getStringByPath("**.find{it.name() == 'CardAcctRec' " +
+        "&& (it.CardAcctId.CardNum.text()=='" +
+        Database.getCardByLoginIdAndCardId(fromCard, getFirstUserLoginID()).get(0).get("CARD_NUMBER") + "') " +
+        "&& (it.CardAcctId.SystemId.text()=='" + System.COD +
+        "')&& it.BankAcctStatus.BankAcctStatusCode.text()=='Active'}"));
+       
+        Long toCard = productsRs.getCardIdByNumber(getActiveUser().getParameter(ExternalParameter.EUR_CARD));
+       
+        Assert.assertNotNull("Мультивалютная карта не найдена", response.getStringByPath("**.find{it.name() == 'CardAcctRec' " +
+        "&& (it.CardAcctId.CardNum.text()=='" +
+        Database.getCardByLoginIdAndCardId(toCard, getFirstUserLoginID()).get(0).get("CARD_NUMBER") + "') " +
+        "&& (it.CardAcctId.SystemId.text()=='" + System.PPRBPCI_TW +
+        "')&&it.BankAcctStatus.BankAcctStatusCode.text()=='Active'}"));
+       
+        InitInternalPaymentRs initRs = new InitInternalPaymentRq()
+            .getInitInternalPaymentRs()
+            .validateCodeZero();
+       
+        SaveInternalPaymentRs saveRs = new SaveInternalPaymentRq()
+            .setFromResource("card:" + fromCard)
+            .setToResource("card:" + toCard)
+            .setBuyAmount("100")
+            .setExactAmount(Amount.DESTINATION_FIELD_EXACT)
+            .setOperationCode(Currency.RUB.name())
+            .getSaveInternalPaymentRs(initRs)
+            .validateCodeZero();
+           
+        new ConfirmPaymentUniversalRq().getConfirmInternalPaymentRs(saveRs).validateNoEditableTagsSuccess();
+       
+        adminLogin();
+       
+        Assert.assertNotNull("Нет запроса CardToCardRequest",
+        findMessageInJournalMobileApi9(fromTime, Request.CARD_TO_CARD_REQUEST));
+       
+        Assert.assertNotNull("Нет поля AccountNum", new MessageLogPage().findValueInRequest("AccountNum"));
+    }
+}
